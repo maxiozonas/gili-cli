@@ -566,6 +566,247 @@ class MagentoAPIClient:
                 return None
             raise
     
+    def _extract_logo_from_html(self, html_content: str) -> Optional[str]:
+        """Extract brand logo URL from HTML description.
+        
+        Searches for img tags in HTML content and identifies brand logos
+        by filename patterns (logo, brand, marca, wysiwyg).
+        
+        Args:
+            html_content: HTML content of product description
+            
+        Returns:
+            Logo URL (absolute) or None if not found
+        """
+        import re
+        
+        if not html_content:
+            return None
+        
+        # Find all img tags with src attribute
+        img_pattern = r'<img[^>]+src=\"([^\"]+)\"'
+        matches = re.findall(img_pattern, html_content)
+        
+        # Logo keywords to identify brand logos
+        logo_keywords = ['logo', 'brand', 'marca', 'wysiwyg']
+        
+        # Search for logo by URL or filename patterns
+        for url in matches:
+            url_lower = url.lower()
+            if any(keyword in url_lower for keyword in logo_keywords):
+                logger.debug("brand_logo_found", url=url)
+                return url
+        
+        logger.debug("brand_logo_not_found")
+        return None
+    
+    def enrich_product_data(self, product: Dict[str, Any]) -> Dict[str, Any]:
+        """Enrich product data with human-readable values for ALL attributes.
+        
+        Transforms ALL attribute values to labels where applicable:
+        - Category IDs → Category names
+        - Brand IDs → Brand names
+        - Status codes → Enabled/Disabled
+        - ALL select/multiselect attributes → Option labels
+        - ALL custom attributes with value → Try to fetch label
+        
+        Args:
+            product: Raw product data from Magento API
+            
+        Returns:
+            Enriched product dictionary with readable values for ALL fields
+        """
+        if not product:
+            return product
+        
+        enriched = product.copy()
+        
+        # Fetch essential mappings
+        cat_map = self._fetch_categories_map()
+        
+        # Cache for attribute options to avoid repeated API calls
+        attribute_options_cache = {}
+        
+        def get_attribute_options(attribute_code: str) -> Dict[str, str]:
+            """Get attribute options with caching."""
+            if attribute_code not in attribute_options_cache:
+                attribute_options_cache[attribute_code] = self._fetch_attribute_options(attribute_code)
+            return attribute_options_cache[attribute_code]
+        
+        # Static mappings for common fields
+        static_mappings = {
+            "status": {"1": "Enabled", "2": "Disabled"},
+            "visibility": {
+                "1": "Not Visible Individually",
+                "2": "Catalog",
+                "3": "Search",
+                "4": "Catalog, Search"
+            },
+            "tax_class_id": {
+                "0": "None",
+                "2": "Taxable Goods",
+                "3": "Shipping",
+                "4": "Iva"
+            },
+            "gender": {"96": "Male", "97": "Female", "98": "Unisex"},
+            "eva_material": {"230": "Pino", "231": "MDF", "232": "Algarrobo"}
+        }
+        
+        # Attributes to exclude (too long, HTML, or not useful)
+        excluded_attributes = {
+            "description",          # HTML description - too long
+            "image",                # Image path
+            "small_image",          # Small image path
+            "thumbnail",            # Thumbnail path
+            "swatch_image",         # Swatch image path
+            "url_key",              # URL key
+            "meta_title",           # Meta title
+            "meta_keyword",         # Meta keywords
+            "meta_description",     # Meta description
+            "special_price",        # Special price
+            "special_from_date",    # Special price from date
+            "special_to_date",      # Special price to date
+            "options_container",    # Options container
+            "tax_class_id",         # Tax class ID
+            "msrp_display_actual_price_type",  # MSRP display type
+            "msrp",                 # MSRP price
+            "news_from_date",       # News from date
+            "news_to_date",         # News to date
+            "custom_design",        # Custom design
+            "custom_design_from",   # Custom design from
+            "custom_design_to",     # Custom design to
+            "custom_layout_update", # Custom layout update
+            "page_layout",          # Page layout
+            "gift_message_available", # Gift message available
+            "quantity_and_stock_status", # Quantity and stock status
+            "is_returnable",        # Is returnable
+            "shipment_type"         # Shipment type
+        }
+        
+        # Enrich custom_attributes - ALL fields except excluded
+        enriched_custom_attrs = []
+        category_names = []
+        brand_logo_url = None  # Store brand logo URL
+        
+        for attr in product.get("custom_attributes", []):
+            attr_code = attr.get("attribute_code")
+            attr_value = attr.get("value")
+            
+            # Special handling for description - extract logo but don't include in output
+            if attr_code == "description":
+                if attr_value:
+                    brand_logo_url = self._extract_logo_from_html(attr_value)
+                continue  # Don't add description to enriched attributes
+            
+            # Skip excluded attributes
+            if attr_code in excluded_attributes:
+                continue
+            
+            # Create enriched attribute
+            enriched_attr = {
+                "attribute_code": attr_code,
+                "value": attr_value
+            }
+            
+            # Skip if value is None or empty
+            if not attr_value:
+                enriched_custom_attrs.append(enriched_attr)
+                continue
+            
+            # Special handling for category_ids
+            if attr_code == "category_ids":
+                if isinstance(attr_value, list):
+                    cat_ids = attr_value
+                elif isinstance(attr_value, str):
+                    cat_ids = attr_value.split(",")
+                else:
+                    cat_ids = []
+                
+                cat_names = [cat_map.get(str(cid).strip(), str(cid)) for cid in cat_ids]
+                category_names = cat_names
+                enriched_attr["category_names"] = cat_names
+                enriched_attr["categories"] = ", ".join(cat_names) if cat_names else "Sin Categoria"
+                enriched_attr["label"] = ", ".join(cat_names) if cat_names else "Sin Categoria"
+            
+            # Check static mappings first
+            elif attr_code in static_mappings:
+                label = static_mappings[attr_code].get(str(attr_value).strip())
+                if label:
+                    enriched_attr["label"] = label
+            
+            # For ALL other attributes, try to fetch options from API
+            else:
+                try:
+                    # Try to get attribute options
+                    options_map = get_attribute_options(attr_code)
+                    
+                    if options_map:
+                        value_str = str(attr_value).strip()
+                        label = options_map.get(value_str)
+                        
+                        if label:
+                            enriched_attr["label"] = label
+                        else:
+                            # If no label found, keep value as-is but log
+                            logger.debug(
+                                "attribute_label_not_found",
+                                attribute_code=attr_code,
+                                value=attr_value
+                            )
+                except Exception as e:
+                    # If fetching options fails, continue without label
+                    logger.debug(
+                        "failed_to_fetch_attribute_options",
+                        attribute_code=attr_code,
+                        error=str(e)
+                    )
+            
+            enriched_custom_attrs.append(enriched_attr)
+        
+        enriched["custom_attributes"] = enriched_custom_attrs
+        
+        # Enrich extension_attributes - category_links
+        if "extension_attributes" in product:
+            ext_attrs = product["extension_attributes"].copy()
+            
+            if "category_links" in ext_attrs:
+                enriched_cat_links = []
+                for link in ext_attrs["category_links"]:
+                    cat_id = link.get("category_id")
+                    cat_name = cat_map.get(str(cat_id), str(cat_id))
+                    
+                    enriched_link = link.copy()
+                    enriched_link["category_name"] = cat_name
+                    enriched_cat_links.append(enriched_link)
+                
+                ext_attrs["category_links"] = enriched_cat_links
+                ext_attrs["category_names"] = category_names if category_names else [cat_map.get(str(cat_id), str(cat_id)) for cat_id in [link.get("category_id") for link in enriched_cat_links]]
+            
+            enriched["extension_attributes"] = ext_attrs
+        
+        # Create simplified output with only essential fields
+        simplified = {
+            "id": enriched.get("id"),
+            "sku": enriched.get("sku"),
+            "name": enriched.get("name"),
+            "attribute_set_id": enriched.get("attribute_set_id"),
+            "custom_attributes": enriched.get("custom_attributes", [])
+        }
+        
+        # Add brand logo URL if found
+        if brand_logo_url:
+            simplified["brand_logo_url"] = brand_logo_url
+        
+        # Add categories if available (from enrichment)
+        if category_names:
+            simplified["categories"] = ", ".join(category_names)
+        
+        # Add extension_attributes category_names if available
+        if "extension_attributes" in enriched and "category_names" in enriched["extension_attributes"]:
+            simplified["category_names"] = enriched["extension_attributes"]["category_names"]
+        
+        return simplified
+    
     def update_product_stock(self, sku: str, stock_qty: int) -> bool:
         """Update product stock quantity.
         

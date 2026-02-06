@@ -213,6 +213,67 @@ python main.py validate
 
 ---
 
+### 8. `product` - Buscar Producto por SKU
+
+Busca un producto por su SKU y retorna todos sus atributos en formato JSON.
+
+```bash
+python main.py product 00042
+```
+
+**Parámetros:**
+
+| Parámetro | Opción | Descripción | Valor por defecto |
+|-----------|--------|-------------|-------------------|
+| `SKU` | Requerido | SKU del producto (5 caracteres, rellenar con ceros) | - |
+| `--output`, `-o` | Opcional | Guardar resultado en archivo JSON | `None` |
+| `--raw` | Opcional | Mostrar respuesta cruda de la API sin procesar | `False` |
+| `--compact` | Opcional | JSON en una línea (sin formato) | `False` |
+
+**Ejemplo:**
+```bash
+# Búsqueda básica - JSON formateado en terminal
+python main.py product 00042
+
+# Guardar a archivo
+python main.py product 00042 --output producto.json
+
+# JSON en una línea (útil para scripts o piping)
+python main.py product 00042 --compact
+
+# Combinar con jq para filtrar campos
+python main.py product 00042 --compact | jq '.price'
+
+# Respuesta cruda de la API
+python main.py product 00042 --raw
+```
+
+**Salida:** 
+- Por defecto: JSON formateado con syntax highlighting en terminal
+- Con `--output`: Archivo JSON adicional guardado en disco
+- Con `--compact`: Una línea de JSON sin formato
+- Con `--raw`: Respuesta cruda de la API de Magento
+
+**Ejemplo de salida JSON:**
+```json
+{
+  "id": 1234,
+  "sku": "00042",
+  "name": "Producto Ejemplo",
+  "price": 15000.00,
+  "status": 1,
+  "type_id": "simple",
+  "custom_attributes": [
+    {
+      "attribute_code": "brand",
+      "value": "123"
+    }
+  ]
+}
+```
+
+---
+
 ## ✨ Características Principales
 
 ### Módulo de Análisis RFM (Recencia, Frecuencia, Valor Monetario)
